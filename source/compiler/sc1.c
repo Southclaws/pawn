@@ -108,7 +108,7 @@ static cell init(int ident,int *tag,int *errorfound);
 static int getstates(const char *funcname);
 static void attachstatelist(symbol *sym, int state_id);
 static void funcstub(int fnative);
-static int newfunc(char *firstname,int firsttag,int fpublic,int fstatic,int stock);
+static int newfunc(char *firstname,int firsttag,int fpublic,int fstatic,int fstock);
 static int declargs(symbol *sym,int chkshadow);
 static void doarg(char *name,int ident,int offset,int tags[],int numtags,
                   int fpublic,int fconst,int written,int chkshadow,arginfo *arg);
@@ -1798,8 +1798,11 @@ static void parse(void)
       emit_flags &= ~efGLOBAL;
       break;
     case tNEW:
-      if (getclassspec(tok,&fpublic,&fstatic,&fstock,&fconst))
+      if (getclassspec(tok,&fpublic,&fstatic,&fstock,&fconst)) {
+        if (matchtoken(t__PRAGMA))
+          dopragma();
         declglb(NULL,0,fpublic,fstatic,fstock,fconst);
+      } /* if */
       break;
     case tSTATIC:
       if (matchtoken(tENUM)) {
@@ -1845,7 +1848,10 @@ static void parse(void)
     case tLABEL:
     case tSYMBOL:
     case tOPERATOR:
-      lexpush();
+      if (tok==t__PRAGMA)
+        dopragma();
+      else
+        lexpush();
       if (!newfunc(NULL,-1,FALSE,FALSE,FALSE)) {
         error(10);              /* illegal function or declaration */
         lexclr(TRUE);           /* drop the rest of the line */
@@ -2054,6 +2060,9 @@ static void declfuncvar(int fpublic,int fstatic,int fstock,int fconst)
   cell val;
   int invalidfunc;
 
+  if (matchtoken(t__PRAGMA))
+    dopragma();
+
   tag=pc_addtag(NULL);
   tok=lex(&val,&str);
   /* if we arrived here, this may not be a declaration of a native function
@@ -2062,11 +2071,6 @@ static void declfuncvar(int fpublic,int fstatic,int fstock,int fconst)
   if (tok==tNATIVE) {
     error(42);          /* invalid combination of class specifiers */
     return;
-  } /* if */
-
-  if (tok==t__PRAGMA) {
-    dopragma();
-    tok=lex(&val,&str);
   } /* if */
 
   if (tok!=tSYMBOL && tok!=tOPERATOR) {
@@ -2136,8 +2140,6 @@ static void declglb(char *firstname,int firsttag,int fpublic,int fstatic,int fst
       firstname=NULL;
     } else {
       tag=pc_addtag(NULL);
-      if (matchtoken(t__PRAGMA))
-        dopragma();
       if (lex(&val,&str)!=tSYMBOL)      /* read in (new) token */
         error_suggest(20,str,NULL,estSYMBOL,esfFUNCTION);   /* invalid symbol name */
       assert(strlen(str)<=sNAMEMAX);
@@ -2146,7 +2148,8 @@ static void declglb(char *firstname,int firsttag,int fpublic,int fstatic,int fst
     ispublic=fpublic;
     if (name[0]==PUBLIC_CHAR) {
       ispublic=TRUE;                    /* implicitly public variable */
-      assert(!fstatic);
+      if (fstatic || fstock)
+        error(42);                      /* invalid combination of class specifiers */
     } /* if */
     while (matchtoken('[')) {
       ident=iARRAY;
@@ -3758,7 +3761,7 @@ static void check_reparse(symbol *sym)
 
 static void funcstub(int fnative)
 {
-  int tok,tag,fpublic;
+  int tok,tag,fpublic,fstatic,fstock,fconst;
   char *str;
   cell val,size;
   char symbolname[sNAMEMAX+1];
@@ -3767,6 +3770,7 @@ static void funcstub(int fnative)
   int numdim;
   symbol *sym,*sub;
   int opertok;
+  short filenum;
   unsigned int bck_attributes;
   char *bck_deprecate;  /* in case the user tries to use __pragma("deprecated")
                          * on a function argument */
@@ -3775,6 +3779,17 @@ static void funcstub(int fnative)
   lastst=0;
   litidx=0;                     /* clear the literal pool */
   assert(loctab.next==NULL);    /* local symbol table should be empty */
+  filenum=fcurrent;             /* save file number at the start of the declaration */
+
+  getclassspec(0,&fpublic,&fstatic,&fstock,&fconst);
+  /* a combination of 'public' and 'stock' is already checked in getclassspec() */
+  if (fnative && (fpublic || fstatic || fstock) || (fpublic && fstock))
+    error(42);                  /* invalid combination of class specifiers */
+  else if (fconst)
+    error(10);                  /* illegal function or declaration */
+
+  if (matchtoken(t__PRAGMA))
+    dopragma();
 
   tag=pc_addtag(NULL);			/* get the tag of the return value */
   numdim=0;
@@ -3795,22 +3810,8 @@ static void funcstub(int fnative)
     #endif
     dim[numdim++]=(int)size;
   } /* while */
-
+  
   tok=lex(&val,&str);
-  fpublic=(tok==tPUBLIC) || (tok==tSYMBOL && str[0]==PUBLIC_CHAR);
-  if (fnative) {
-    if (fpublic || tok==tSTOCK || tok==tSTATIC || (tok==tSYMBOL && *str==PUBLIC_CHAR))
-      error(42);                /* invalid combination of class specifiers */
-  } else {
-    if (tok==tPUBLIC || tok==tSTOCK || tok==tSTATIC)
-      tok=lex(&val,&str);
-  } /* if */
-
-  if (tok==t__PRAGMA) {
-    dopragma();
-    tok=lex(&val,&str);
-  } /* if */
-
   if (tok==tOPERATOR) {
     opertok=operatorname(symbolname);
     if (opertok==0)
@@ -3820,6 +3821,12 @@ static void funcstub(int fnative)
     if (tok!=tSYMBOL && freading) {
       error(10);                /* illegal function or declaration */
       return;
+    } /* if */
+    if (str[0]==PUBLIC_CHAR) {
+      if (fnative || fstatic || fstock)
+        error(42);              /* invalid combination of class specifiers */
+      if (!fnative)
+        fpublic=TRUE;
     } /* if */
     strcpy(symbolname,str);
   } /* if */
@@ -3831,8 +3838,22 @@ static void funcstub(int fnative)
   if (fnative) {
     sym->usage=(short)(uNATIVE | uRETVALUE | uDEFINE | (sym->usage & uPROTOTYPED));
     sym->x.lib=curlibrary;
-  } else if (fpublic && opertok==0) {
-    sym->usage|=uPUBLIC;
+  } else {
+    if ((sym->usage & uDEFINE)!=0) {
+      /* if the function has already been defined ("finalized"), we can't accept
+       * any new class specifiers */
+      if ((fpublic && (sym->usage & uDECLPUBLIC)==0) || (fstatic && (sym->usage & uDECLSTATIC)==0))
+        error(25);                /* function heading differs from prototype */
+    } else {
+      if (fpublic && opertok==0)
+        sym->usage |= (uPUBLIC | uDECLPUBLIC);
+      if (fstatic) {
+        sym->usage |= uDECLSTATIC;
+        sym->fnumber=filenum;
+      } /* if */
+    } /* if */
+    if (fstock)
+      sym->usage |= uSTOCK;
   } /* if */
   sym->usage|=uFORWARD;
   check_reparse(sym);
@@ -3916,7 +3937,7 @@ static void funcstub(int fnative)
  *                     glb_declared (altered)
  *                     sc_alignnext (altered)
  */
-static int newfunc(char *firstname,int firsttag,int fpublic,int fstatic,int stock)
+static int newfunc(char *firstname,int firsttag,int fpublic,int fstatic,int fstock)
 {
   symbol *sym,*lvar,*depend;
   int argcnt,tok,tag,funcline,i;
@@ -3946,12 +3967,8 @@ static int newfunc(char *firstname,int firsttag,int fpublic,int fstatic,int stoc
   } else {
     tag= (firsttag>=0) ? firsttag : pc_addtag(NULL);
     tok=lex(&val,&str);
-    if (tok==tNATIVE || (tok==tPUBLIC && stock))
+    if (tok==tNATIVE || (tok==tPUBLIC && fstock))
       error(42);                /* invalid combination of class specifiers */
-    if (tok==t__PRAGMA) {
-      dopragma();
-      tok=lex(&val,&str);
-    } /* if */
     if (tok==tOPERATOR) {
       opertok=operatorname(symbolname);
       if (opertok==0)
@@ -3973,16 +3990,20 @@ static int newfunc(char *firstname,int firsttag,int fpublic,int fstatic,int stoc
   funcline=fline;               /* save line at which the function is defined */
   if (symbolname[0]==PUBLIC_CHAR) {
     fpublic=TRUE;               /* implicitly public function */
-    if (stock)
+    if (fstock || fstatic)
       error(42);                /* invalid combination of class specifiers */
   } /* if */
   sym=fetchfunc(symbolname,tag);/* get a pointer to the function entry */
   if (sym==NULL || (sym->usage & uNATIVE)!=0)
     return TRUE;                /* it was recognized as a function declaration, but not as a valid one */
   if (fpublic && opertok==0)
-    sym->usage|=uPUBLIC;
-  if (fstatic)
+    sym->usage |= (uPUBLIC | uDECLPUBLIC);
+  if (fstatic) {
+    sym->usage |= uDECLSTATIC;
     sym->fnumber=filenum;
+  } /* if */
+  if (fstock)
+    sym->usage|=uSTOCK;
   check_reparse(sym);
   /* we want public functions to be explicitly prototyped, as they are called
    * from the outside
@@ -4027,6 +4048,8 @@ static int newfunc(char *firstname,int firsttag,int fpublic,int fstatic,int stoc
   } /* if */
   attachstatelist(sym,state_id);
   /* so it is not a prototype, proceed */
+  if (((sym->usage & uDECLPUBLIC)!=0 && !fpublic) || ((sym->usage & uDECLSTATIC)!=0 && !fstatic))
+    error(25);                  /* function heading differs from prototype */
   /* if this is a function that is not referred to (this can only be detected
    * in the second stage), shut code generation off */
   if (sc_status==statWRITE && (sym->usage & uREAD)==0 && !fpublic) {
@@ -4046,8 +4069,6 @@ static int newfunc(char *firstname,int firsttag,int fpublic,int fstatic,int stoc
   } /* if */
   begcseg();
   sym->usage|=uDEFINE;  /* set the definition flag */
-  if (stock)
-    sym->usage|=uSTOCK;
   if (opertok!=0 && opererror)
     sym->usage &= ~uDEFINE;
   /* if the function has states, dump the label to the start of the function */
